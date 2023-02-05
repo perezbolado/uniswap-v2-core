@@ -7,7 +7,7 @@ import './libraries/UQ112x112.sol';
 import './interfaces/IERC20.sol';
 import './interfaces/IUniswapV2Factory.sol';
 import './interfaces/IUniswapV2Callee.sol';
-
+        
 contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     using SafeMath  for uint;
     using UQ112x112 for uint224;
@@ -18,6 +18,8 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     address public factory;
     address public token0;
     address public token1;
+    uint public minimumTradeSize0;
+    uint public minimumTradeSize1;
 
     uint112 private reserve0;           // uses single storage slot, accessible via getReserves
     uint112 private reserve1;           // uses single storage slot, accessible via getReserves
@@ -63,10 +65,13 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     // called once by the factory at time of deployment
-    function initialize(address _token0, address _token1) external {
+    function initialize(address _token0, address _token1, uint _minimumTradeSize0, uint _minimumTradeSize1) external {
         require(msg.sender == factory, 'UniswapV2: FORBIDDEN'); // sufficient check
         token0 = _token0;
         token1 = _token1;
+        require( _minimumTradeSize0 == 0 || _minimumTradeSize1 == 0, "UniswapV2: MINIMUM TRADE SIZE CAN ONLY BE SET IN ONE TOKEN" );
+        minimumTradeSize0 = _minimumTradeSize0;
+        minimumTradeSize1 = _minimumTradeSize1;
     }
 
     // update reserves and, on the first call per block, price accumulators
@@ -154,13 +159,35 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
         emit Burn(msg.sender, amount0, amount1, to);
     }
+    // this function should be called to validate a transaction meets a minimum size
+    function validateMinimumSize(uint amount0Out, uint amount1Out, uint112 _reserve0, uint112 _reserve1) private view {
+        //minimum trade size should only be set in one token
+        //there are 3 base scenarios:
+        //1. There is no minimum trade size limit 
+        if (minimumTradeSize0 >0 || minimumTradeSize1 > 0)
+        {
+             //2. There is a minimum trade limit size in the token which is expected to be paid out    
+            if (amount0Out > 0 && minimumTradeSize0 > 0 || amount1Out > 0 && minimumTradeSize1 > 0)
+                require(amount0Out.mul(1000) >= minimumTradeSize0.mul(997) && amount1Out.mul(1000) >= minimumTradeSize1.mul(997), "UniswapV2:UNDER_MINIMUM_SIZE");
+            else
+            {
+                //3. There is a minimum trade limit size in the token in which there was a deposit made
+                if(minimumTradeSize0 ==0 && amount0Out > 0)
+                    //Token0 is going out and limit is 0 for token 0
+                    require(amount0Out.mul(_reserve1).mul(1000) >= (minimumTradeSize1.sub(1)).mul(_reserve0).mul(997), "UniswapV2:UNDER_MINIMUM_SIZE");
+                if(minimumTradeSize1 ==0 && amount1Out > 0)
+                    //Token1 is going out and limit is 0 for token 1
+                    require(amount1Out.mul(_reserve0).mul(1000) >= (minimumTradeSize0.sub(1)).mul(_reserve1).mul(997), "UniswapV2:UNDER_MINIMUM_SIZE");
+            }     
+        }
+    }
 
     // this low-level function should be called from a contract which performs important safety checks
     function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
         require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
         (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
         require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY');
-
+        validateMinimumSize(amount0Out,amount1Out, _reserve0, _reserve1);
         uint balance0;
         uint balance1;
         { // scope for _token{0,1}, avoids stack too deep errors
